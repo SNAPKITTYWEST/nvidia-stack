@@ -1,5 +1,9 @@
 #include <hip/hip_runtime.h>
 #include <rocwmma/rocwmma.hpp>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 using half_t = _Float16;
 
@@ -113,16 +117,145 @@ __global__ void gemm16x16_mfma(
     // If out of bounds, we do nothing (the output is not written, which is correct)
 }
 
-// Host Launch Example
-// To launch the kernel for matrices of size M x K and K x N, producing M x N output:
-//
-// constexpr int BlockThreads = 256; // Must be multiple of 64 (warp size)
-// dim3 block(BlockThreads);
-// dim3 grid(
-//     (N + 15) / 16, // number of 16x16 tiles in N dimension
-//     (M + 15) / 16 / (BlockThreads / 64) // number of 16x16 tiles in M dimension per wave, divided by waves per block
-// );
-// gemm16x16_mfma<BlockThreads><<<grid, block>>>(d_A, d_B, d_C, d_D, M, N, K);
-// hipDeviceSynchronize();
-//
-// Compilation: hipcc -std=c++17 -offload-arch=gfx942 gemm_kernel.cpp -o gemm -lrocwmma
+// Host test harness
+void run_test(int test_case) {
+    const int M = 16, N = 16, K = 16;
+    const size_t A_size = M * K;
+    const size_t B_size = K * N;
+    const size_t C_size = M * N;
+    const size_t D_size = M * N;
+
+    half_t *h_A = (half_t*)malloc(A_size * sizeof(half_t));
+    half_t *h_B = (half_t*)malloc(B_size * sizeof(half_t));
+    float *h_C = (float*)malloc(C_size * sizeof(float));
+    float *h_D = (float*)malloc(D_size * sizeof(float));
+    float *h_D_ref = (float*)malloc(D_size * sizeof(float));
+
+    // Initialize to zero
+    memset(h_A, 0, A_size * sizeof(half_t));
+    memset(h_B, 0, B_size * sizeof(half_t));
+    memset(h_C, 0, C_size * sizeof(float));
+
+    // Set values based on test case
+    half_t inf = __float2half(INFINITY);
+    half_t neg_inf = __float2half(-INFINITY);
+    half_t nan = __float2half(NAN); // quiet NaN
+    float nanf = NAN;
+
+    switch (test_case) {
+        case 0: // Normal
+            for (size_t i = 0; i < A_size; i++) h_A[i] = __float2half(1.0f);
+            for (size_t i = 0; i < B_size; i++) h_B[i] = __float2half(1.0f);
+            break;
+        case 1: // NaN in A at [0,0]
+            h_A[0] = nan;
+            break;
+        case 2: // NaN in B at [0,0]
+            h_B[0] = nan;
+            break;
+        case 3: // NaN in C at [0,0]
+            h_C[0] = nanf;
+            break;
+        case 4: // 0 * Inf: A[0,0]=0, B[0,0]=Inf
+            // h_A[0] is already 0
+            h_B[0] = inf;
+            break;
+        case 5: // Inf * 0: A[0,0]=Inf, B[0,0]=0
+            h_A[0] = inf;
+            break;
+        case 6: // +Inf + -Inf
+            h_A[0] = __float2half(1.0f); // A[0,0]
+            h_B[0] = inf; // B[0,0]
+            h_A[1] = __float2half(1.0f); // A[0,1] (since K=16, A[0,1] is at index 1)
+            h_B[16] = neg_inf; // B[1,0] (B is [K][N], so B[1,0] is at index 1*N+0 = 16)
+            break;
+        default:
+            printf("Invalid test case %d\n", test_case);
+            free(h_A); free(h_B); free(h_C); free(h_D); free(h_D_ref);
+            return;
+    }
+
+    // Allocate device memory
+    half_t *d_A, *d_B;
+    float *d_C, *d_D;
+    hipMalloc(&d_A, A_size * sizeof(half_t));
+    hipMalloc(&d_B, B_size * sizeof(half_t));
+    hipMalloc(&d_C, C_size * sizeof(float));
+    hipMalloc(&d_D, D_size * sizeof(float));
+    hipMemcpy(d_A, h_A, A_size * sizeof(half_t), hipMemcpyHostToDevice);
+    hipMemcpy(d_B, h_B, B_size * sizeof(half_t), hipMemcpyHostToDevice);
+    hipMemcpy(d_C, h_C, C_size * sizeof(float), hipMemcpyHostToDevice);
+    hipMemset(d_D, 0, D_size * sizeof(float)); // initialize D to zero
+
+    // Launch kernel
+    constexpr int BlockThreads = 256; // must be multiple of 64
+    const int warpSize = hipWarpSize;
+    const int WavesPerBlock = BlockThreads / warpSize;
+    dim3 block(BlockThreads);
+    dim3 grid(
+        (N + 15) / 16, // grid.x: ceil(N / 16.0)
+        (M + 16 * WavesPerBlock - 1) / (16 * WavesPerBlock) // grid.y: ceil(M / (16.0 * WavesPerBlock))
+    );
+
+    gemm16x16_mfma<BlockThreads><<<grid, block>>>(d_A, d_B, d_C, d_D, M, N, K);
+    hipDeviceSynchronize();
+
+    // Copy D back to host
+    hipMemcpy(h_D, d_D, D_size * sizeof(float), hipMemcpyDeviceToHost);
+
+    // Compute reference on host
+    for (int m = 0; m < M; m++) {
+        for (int n = 0; n < N; n++) {
+            float acc = h_C[m * N + n]; // C is float*
+            for (int k = 0; k < K; k++) {
+                half_t a = h_A[m * K + k];
+                half_t b = h_B[k * N + n];
+                float product = __half2float(__hmul(a, b));
+                acc += product;
+            }
+            h_D_ref[m * N + n] = acc;
+        }
+    }
+
+    // Compare
+    bool passed = true;
+    for (size_t i = 0; i < D_size; i++) {
+        float ref = h_D_ref[i];
+        float res = h_D[i];
+        if (std::isnan(ref)) {
+            if (!std::isnan(res)) {
+                printf("Error at %zu: expected NaN, got %f\n", i, res);
+                passed = false;
+            }
+        } else {
+            if (std::isnan(res)) {
+                printf("Error at %zu: expected %f, got NaN\n", i, ref);
+                passed = false;
+            } else {
+                float diff = fabsf(ref - res);
+                if (diff > 1e-5f) {
+                    printf("Error at %zu: expected %f, got %f (diff=%f)\n", i, ref, res, diff);
+                    passed = false;
+                }
+            }
+        }
+    }
+
+    if (passed) {
+        printf("Test case %d passed.\n", test_case);
+    } else {
+        printf("Test case %d failed.\n", test_case);
+    }
+
+    // Cleanup
+    free(h_A); free(h_B); free(h_C); free(h_D); free(h_D_ref);
+    hipFree(d_A); hipFree(d_B); hipFree(d_C); hipFree(d_D);
+}
+
+int main() {
+    // Run all test cases
+    for (int test_case = 0; test_case <= 6; test_case++) {
+        run_test(test_case);
+    }
+    return 0;
+}
