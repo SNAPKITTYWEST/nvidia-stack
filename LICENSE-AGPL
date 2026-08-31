@@ -1,0 +1,29 @@
+GNU Affero General Public License v3.0
+
+Workers Layer: snapkitty-transformer/workers/
+API Layer: snapkitty-transformer/api/
+Inference Server: snapkitty-transformer/server/
+
+Copyright (C) 2026 SNAPKITTYWEST (Bel Esprit D'Accord Irrevocable Trust)
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+If you run a modified version of this program as a network service,
+you must make the complete source code of the modified version available
+to all users interacting with it.
+
+COPYLEFT PROVISION:
+  Any derivative work based on this program must be licensed under
+  the GNU Affero General Public License v3.0. No relicensing permitted
+  without explicit written consent from the Licensor.
+
+THE SUBSTRATE IS NOT FOR SALE. IT IS NOT FOR PORTING.
+IT IS FOR EXECUTION IN THE WILD.

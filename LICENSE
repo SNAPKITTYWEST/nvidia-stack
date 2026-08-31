@@ -1,0 +1,62 @@
+Business Source License 1.1
+
+Licensor:      SNAPKITTYWEST (Bel Esprit D'Accord Irrevocable Trust)
+Licensed Work: SnapKitty Transformer 8B
+               Full repository
+
+Change Date:    2030-01-01
+Change License: GNU Affero General Public License v3.0
+
+PROTECTED INVENTIONS (original inventions of SNAPKITTYWEST):
+
+  1. SNAPKITTY TRANSFORMER ARCHITECTURE
+     8B parameter transformer model with novel attention mechanisms,
+     training procedures, and inference optimizations.
+
+  2. FLASHATTENTION FUSED GEMM + ONLINE SOFTMAX KERNEL
+     Production-ready CUDA kernel for NVIDIA Ampere (sm_80+) with:
+     - cp.async global-to-shared memory copies
+     - mma.sync.aligned.m16n8k16 Tensor Core operations
+     - Online softmax with running max/sum accumulators
+     - Double-buffered K/V tile processing
+     - Warp-level reductions via __shfl_down_sync
+
+  3. SOVEREIGN TRAINING DATA PIPELINE
+     Proprietary data curation, filtering, and augmentation methods
+     for transformer pre-training.
+
+  4. INFERENCE OPTIMIZATION SUITE
+     Quantization, pruning, and distillation techniques specific to
+     the SnapKitty Transformer architecture.
+
+Grant of Rights:
+  You may copy, modify, create derivative works, redistribute, and
+  make non-production use of the Licensed Work.
+
+  You may make production use for your own applications.
+
+  You may NOT offer the Licensed Work to third parties as a hosted
+  transformer service or AI API that competes with any commercial
+  offering by the Licensor.
+
+  You may NOT incorporate the FlashAttention kernel, training pipeline,
+  or inference optimizations into a competing commercial AI product
+  without a commercial license from the Licensor.
+
+  You may NOT remove or obscure any licensing, copyright, or other
+  notices from the Licensed Work.
+
+  Commercial use requires a Sovereign Node Key from the Licensor.
+
+  Contact: ahmedparr93@gmail.com · jessicalw34@gmail.com
+
+COPYLEFT PROVISION:
+  Any derivative work based on the Licensed Work must be licensed under
+  the same Business Source License 1.1 terms. No relicensing permitted
+  without explicit written consent from the Licensor.
+
+THE LICENSED WORK IS PROVIDED AS IS. THE LICENSOR DISCLAIMS ALL
+WARRANTIES, EXPRESS OR IMPLIED.
+
+THE SUBSTRATE IS NOT FOR SALE. IT IS NOT FOR PORTING.
+IT IS FOR EXECUTION IN THE WILD.
