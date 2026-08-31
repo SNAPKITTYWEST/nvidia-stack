@@ -28,6 +28,7 @@ PyTorch/CuTe Layouts → PTX/SASS ISA → Tensor Core/MFMA Microarchitecture →
 | Instruction Set | SASS HMMA/LDG/STG (Rust) | AMDGPU MFMA ISA (asm) |
 | Microarchitecture | Tensor Core MAC simulation (Rust) | Matrix Core wave simulation |
 | Memory | Global/L1/L2 cache model | LDS bank conflict avoidance + XOR swizzle |
+| High-Level API | — | HIP/rocwmma GEMM (fragment loads, mfma_sync) |
 | Validation | — | Fragment map validator + structural checks |
 | Layout Search | — | Padding + XOR swizzle optimizer |
 | Assembly | — | gfx942 MFMA GEMM kernels |
@@ -48,6 +49,8 @@ nvidia-stack/
 │   ├── mfma_f16_16x16x16.s             AMDGPU MFMA basic tile (gfx90a)
 │   ├── mfma_lds_staging.s              gfx942 MFMA with LDS ping-pong staging
 │   └── mfma_lds_xor_swizzle.s          gfx942 MFMA with XOR swizzle bank conflict avoidance
+├── hip/
+│   └── gemm_kernel.cpp                 HIP/rocwmma GEMM (16x16 MFMA, multi-wave, shared memory)
 ├── python/
 │   ├── fragment_map.py                  Opcode-accurate fragment map + layout search
 │   ├── structural_validator.py          Bijectivity, per-lane, VGPR, C/D checks
@@ -143,6 +146,24 @@ llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx942 -filetype=obj asm/mfma_lds_xor_sw
 # Assemble for gfx90a
 llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx90a -filetype=obj asm/mfma_f16_16x16x16.s -o mfma_basic.o
 ```
+
+### HIP/rocwmma GEMM
+
+```bash
+# Compile for gfx942
+hipcc -std=c++17 -offload-arch=gfx942 hip/gemm_kernel.cpp -o gemm -lrocwmma
+
+# Run
+./gemm
+```
+
+Features:
+- 16×16×16 MFMA tiles via rocwmma fragments
+- Multi-wave execution (4 waves per block, 256 threads)
+- Shared memory staging for A/B tiles
+- Bounds-safe zero-padding for non-multiple dimensions
+- FP16 inputs, FP32 accumulation
+- NaN propagation per IEEE-754 FMA rules
 
 ---
 
