@@ -1,0 +1,118 @@
+// ======================
+// PagedAttention KV Cache Manager
+// Logical specification via Datalog (Soufflé)
+// ======================
+//
+// Maps logical token positions to physical GPU addresses through
+// block table indirection, eliminating KV cache fragmentation.
+//
+// Block size = 256 bytes (16 tokens x 16 heads x 128 head_dim x 2 bytes/float16)
+// For Llama-2 with GQA (num_kv_heads=8, head_dim=64):
+//   Per-token storage = 8 * 64 * 2 = 1024 bytes
+//   Tokens per block = 256 / 1024 = 0.25 (INVALID for this config)
+//   Production block size = 16 tokens * 1024 bytes = 16384 bytes
+//   We use 256-byte abstract blocks for schema clarity.
+
+// ======================
+// SCHEMA DECLARATIONS
+// ======================
+
+// Sequence metadata: maps sequence ID to its block table pointer
+.decl root_table(seq_id: number, block_table_ptr: number)
+.input root_table
+
+// Block table: maps logical block index to physical GPU base address + refcount
+// refcount enables prefix caching (beam search, tree attention)
+.decl block_table_entry(
+    block_table_id: number,
+    block_index: number,
+    physical_block_base: number,
+    refcount: number
+)
+.input block_table_entry
+
+// Token position decomposition: logical position -> block index + intra-block offset
+// For block_size B: block_index = token_pos / B, offset = token_pos % B
+.decl virtual_token(
+    seq_id: number,
+    token_pos: number,
+    block_index: number,
+    offset_in_block: number
+)
+.input virtual_token
+
+// Swapped blocks: CPU-resident under GPU memory pressure
+.decl swapped_block(
+    block_table_id: number,
+    block_index: number,
+    cpu_base_address: number
+)
+.input swapped_block
+
+// Output: resolved physical KV cache address for each token
+.decl resolved_kv_address(
+    seq_id: number,
+    token_pos: number,
+    physical_address: number
+)
+.output resolved_kv_address
+
+// ======================
+// INTEGRITY CONSTRAINTS
+// ======================
+
+// Physical base must be 256-byte aligned (matches cache line x 2)
+:- block_table_entry(_, _, Base, _), Base mod 256 != 0.
+
+// Offset must be within block bounds [0, 255]
+:- virtual_token(_, _, _, Offset), Offset < 0 or Offset >= 256.
+
+// Refcount must be non-negative
+:- block_table_entry(_, _, _, Refcount), Refcount < 0.
+
+// ======================
+// CORE ADDRESS TRANSLATION
+// ======================
+
+// Case 1: Block resident in GPU memory
+resolved_kv_address(SeqID, TokenPos, PhysAddr) :-
+    virtual_token(SeqID, TokenPos, BlockIdx, Offset),
+    root_table(SeqID, BlockTablePtr),
+    block_table_entry(BlockTablePtr, BlockIdx, BlockBase, _),
+    PhysAddr = BlockBase + Offset.
+
+// Case 2: Block swapped to CPU (fallback path)
+resolved_kv_address(SeqID, TokenPos, PhysAddr) :-
+    virtual_token(SeqID, TokenPos, BlockIdx, Offset),
+    root_table(SeqID, BlockTablePtr),
+    swapped_block(BlockTablePtr, BlockIdx, CPUBase),
+    PhysAddr = CPUBase + Offset.
+
+// ======================
+// TEST DATASET
+// ======================
+
+// Sequence root tables
+root_table(1, 100).  // Sequence 1 uses block table 100
+root_table(2, 101).  // Sequence 2 uses block table 101
+
+// Block table entries (physical bases + refcounts)
+// Format: block_table_entry(<table_id>, <block_idx>, <base_addr>, <refcount>)
+block_table_entry(100, 0, 0x10000000, 2).  // Block 0: shared by 2 sequences (common prefix)
+block_table_entry(100, 1, 0x20000000, 1).  // Block 1: unique to sequence 1
+block_table_entry(101, 0, 0x30000000, 1).  // Block 0: sequence 2
+block_table_entry(101, 2, 0x40000000, 1).  // Block 2: sequence 2
+
+// Virtual token decompositions (token_pos -> block_idx, offset)
+// Block size = 256 bytes, stride_per_token = 16 bytes (toy model)
+virtual_token(1, 0, 0, 0).    // Seq1, Token 0: block 0, offset 0
+virtual_token(1, 15, 0, 15).  // Seq1, Token 15: block 0, offset 15
+virtual_token(1, 16, 1, 0).   // Seq1, Token 16: block 1, offset 0
+virtual_token(1, 31, 1, 15).  // Seq1, Token 31: block 1, offset 15
+virtual_token(1, 32, 2, 0).   // Seq1, Token 32: block 2, offset 0 (triggers swap/alloc)
+virtual_token(2, 0, 0, 0).    // Seq2, Token 0: block 0, offset 0 (shares with seq1)
+virtual_token(2, 16, 1, 0).   // Seq2, Token 16: block 1, offset 0
+virtual_token(2, 32, 2, 0).   // Seq2, Token 32: block 2, offset 0
+
+// Swapped blocks (under memory pressure)
+swapped_block(100, 2, 0x70000000).  // Seq1's block 2 swapped to CPU
