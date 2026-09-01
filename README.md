@@ -74,6 +74,7 @@ PyTorch/CuTe Layouts → PTX/SASS ISA → Tensor Core/MFMA Microarchitecture →
 | Memory | Global/L1/L2 cache model | LDS bank conflict avoidance + XOR swizzle |
 | KV Cache | — | PagedAttention block table manager (HIP/CUDA) |
 | Logical Spec | — | Datalog/Souffle PagedAttention schema |
+| SSM Backbone | Mamba-2 SSD selective scan (CUDA) | Mamba-2 SSD selective scan (HIP) |
 | High-Level API | — | HIP/rocwmma GEMM (fragment loads, mfma_sync) |
 | Validation | — | Fragment map validator + structural checks |
 | Layout Search | — | Padding + XOR swizzle optimizer |
@@ -109,6 +110,10 @@ nvidia-stack/
 │       ├── resolve_kv_address          Fused device function (matches Datalog rules)
 │       ├── paged_attention_kernel      Attention with paged KV cache reads
 │       └── Fragmentation Benchmark     ShareGPT workload validation
+├── kernels/
+│   ├── mamba2_torch.py                  PyTorch Mamba-2 SSD module (pure-PyTorch + CUDA dispatch)
+│   ├── mamba2.cu                        Mamba-2 SSD CUDA kernel (sm_86/sm_89+, fp8 quantisation)
+│   └── build_mamba2.py                 Build libmamba2.so (nvcc compile + link)
 ├── python/
 │   ├── fragment_map.py                  Opcode-accurate fragment map + layout search
 │   ├── structural_validator.py          Bijectivity, per-lane, VGPR, C/D checks
@@ -264,6 +269,49 @@ Constraints enforced:
 - Offset bounds (`0 <= Offset < 256`)
 - Non-negative refcount
 
+### Mamba-2 SSD Selective Scan
+
+```bash
+# Pure PyTorch (no nvcc required, runs on RTX 3080)
+cd kernels
+python mamba2_torch.py
+
+# Build CUDA extension (requires nvcc on bbqbaddie)
+python build_mamba2.py --arch sm_86   # RTX 3080
+python build_mamba2.py --arch sm_89   # RTX 5000 Ada
+```
+
+Three execution modes (auto-selected):
+1. **CUDA .so** — fastest; requires compiled `libmamba2.so`
+2. **torch.ops** — JIT compile via `torch.utils.cpp_extension.load()`
+3. **Pure PyTorch** — reference implementation; numerically identical to CUDA kernel
+
+```python
+from kernels.mamba2_torch import Mamba2Layer, Mamba2Block, Mamba2Model
+
+# Single layer
+layer = Mamba2Layer(d_model=512, d_state=16, d_conv=4)
+x = torch.randn(2, 128, 512)          # [B, L, D]
+y, h = layer(x)                        # y: [B, L, D], h: [B, D, N] state
+
+# Autoregressive step
+x_step = torch.randn(2, 1, 512)
+y_step, h = layer(x_step, recurrent_state=h)
+
+# Full model (stack of Mamba-2 blocks)
+model = Mamba2Model(d_model=512, n_layers=4, vocab_size=512)
+tokens = torch.randint(0, 512, (2, 128))
+out, states = model(tokens)             # out: [2, 128, 512]
+```
+
+Features:
+- Mamba-2 SSD (Structured State-Space Duality) selective scan
+- Causal depthwise conv with cache for autoregressive inference
+- Recurrent state carry: `(ssm_h, conv_cache)` per layer
+- FP8 quantisation in CUDA kernel (simulated on sm_86, native on sm_89+)
+- Chunk-parallel SSD kernel for long sequences
+- Haskell FFI: `mamba2_step_fp8()` / `mamba2_forward_fp8()`
+
 ---
 
 ## Fragment Map (v_mfma_f32_16x16x16f16)
@@ -337,6 +385,12 @@ Eliminates bank conflicts without increasing LDS consumption.
      kernels, and ShareGPT-validated fragmentation benchmarks
      (<5% vs 40-60% contiguous).
 
+  7. MAMBA-2 SSD SELECTIVE SCAN (CUDA/PYTORCH)
+     Sovereign Mamba-2 implementation with fp8 quantisation,
+     chunk-parallel SSD kernel, recurrent state carry for
+     autoregressive inference, and Haskell FFI for BOB Architecture
+     integration. Numerically equivalent CUDA and pure-PyTorch paths.
+
 ---
 
 ## License
@@ -359,7 +413,7 @@ This project is a **sovereign corporate product** licensed under **Business Sour
   title={NVIDIA Stack: Reverse-Engineered GPU Compute Stack},
   author={Ahmad Ali Parr and Jessica Westerhoff},
   year={2026},
-  note={CuTe/SASS/MFMA simulator with fragment map validation},
+  note={CuTe/SASS/MFMA simulator, PagedAttention, Mamba-2 SSD selective scan},
   publisher={SNAPKITTYWEST},
   howpublished={\url{https://github.com/SNAPKITTYWEST/nvidia-stack}},
   license={BSL-1.1}
