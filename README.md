@@ -76,6 +76,7 @@ PyTorch/CuTe Layouts → PTX/SASS ISA → Tensor Core/MFMA Microarchitecture →
 | Logical Spec | — | Datalog/Souffle PagedAttention schema | — | #q dialect (MLIR TableGen) |
 | SSM Backbone | Mamba-2 SSD selective scan (CUDA) | Mamba-2 SSD selective scan (HIP) | — | — |
 | Waveform Synthesis | — | — | LW-LGM latent-to-waveform (Rust/NASM) | — |
+| FSL Dialect | Mamba-2 SSM state transition (C++) | Selective SSM with SiLU gating (C++) | — | FSM + continuous hybrid semantics |
 | Quantum Circuits | — | — | — | Rust-Q + QIR lowering (Rust) |
 | High-Level API | — | HIP/rocwmma GEMM (fragment loads, mfma_sync) | — | Circuit builder |
 | Validation | — | Fragment map validator + structural checks | Linearity + energy tests | No-cloning + angle domain |
@@ -123,6 +124,14 @@ nvidia-stack/
 │   │   └── main.rs                     CLI demo
 │   ├── latent_to_waveform_nasm.asm     x86-64 AVX2 GEMV kernel (NASM)
 │   └── lw_lgm.py                       Python reference implementation + validation
+├── fsl/
+│   ├── include/
+│   │   ├── FSLTypes.td                 MLIR TableGen: statevector, tokenvector, ssmmatrices types
+│   │   └── FSLOps.td                   MLIR TableGen: mamba_step, selective_mamba_step, output_projection ops
+│   └── kernels/
+│       ├── fsl_mamba_step.cpp          Basic SSM state transition kernel (C)
+│       ├── fsl_selective_mamba_step.cpp Selective Mamba-2 SSM kernel with SiLU gating (C)
+│       └── fsl_mamba_test.cpp          Unit tests for FSL kernels
 ├── quantum/
 │   ├── include/
 │   │   ├── QuantumTypes.td             MLIR TableGen: qubit, qureg, pauli types
@@ -369,6 +378,44 @@ Features:
 - AVX2 FMA kernel with cache-blocking for large matrices
 - Python reference with linearity + energy validation tests
 
+### FSL Dialect — Mamba Step Kernels
+
+```bash
+# Compile and run FSL kernel tests
+cd fsl/kernels
+g++ -O2 -o fsl_test fsl_mamba_step.cpp fsl_selective_mamba_step.cpp fsl_mamba_test.cpp
+./fsl_test
+```
+
+Hybrid continuous-discrete semantics for Mamba-2 SSM:
+
+```cpp
+#include "fsl_mamba_step.cpp"
+
+// Basic Mamba step: s_{t+1} = A * s_t + B * u_t
+float state[16], input[512], A[16*16], B[16*512], next_state[16], output[512];
+fsl_mamba_step(state, input, A, B, next_state, output, 16, 512);
+
+// Selective Mamba-2 step with SiLU gating
+float A_log[16], W_conv[512*4];
+fsl_selective_mamba_step(state, input, A_log, B, W_conv,
+                         next_state, output, 16, 512, 4);
+
+// FSM transition (discrete state)
+int new_state = fsl_fsm_transition(0, 1, condition_flag);
+
+// Scan complete check
+int done = fsl_scan_complete(next_state, 16, 1e-6f);
+```
+
+Features:
+- Basic SSM: s_{t+1} = A * s_t + B * u_t (fixed A, B)
+- Selective SSM: depthwise conv + SiLU gating + SSM update
+- FSM semantics: discrete state transitions gated by conditions
+- YAML-configured parameters (d_state=16, d_model=512, d_conv=4)
+- MLIR TableGen ops: `fsl.mamba_step`, `fsl.selective_mamba_step`
+- Hybrid continuous-discrete: SSM state evolves continuously, FSM gates actions
+
 ### Quantum Dialect (#q) + Rust-Q
 
 ```bash
@@ -513,13 +560,19 @@ Eliminates bank conflicts without increasing LDS consumption.
      energy bounds, AVX2 FMA assembly kernel, and cache-blocked GEMV
      for large dictionary matrices.
 
-  9. LINEAR-TYPE QUANTUM DIALECT (#q) + RUST-Q
-     Strict linear-type refinement of CUDA-Q Quake with no-cloning
-     enforcement at the type level, exact algebraic angles (rational,
-     not floating-point), and explicit QIR lowering to
-     __quantum__qis__* / __quantum__rt__* symbols. Includes
-     algebraic rewrite patterns (H²=I, T³=S², Rz merge) and
-     multi-target controlled-gate support.
+   9. LINEAR-TYPE QUANTUM DIALECT (#q) + RUST-Q
+      Strict linear-type refinement of CUDA-Q Quake with no-cloning
+      enforcement at the type level, exact algebraic angles (rational,
+      not floating-point), and explicit QIR lowering to
+      __quantum__qis__* / __quantum__rt__* symbols. Includes
+      algebraic rewrite patterns (H²=I, T³=S², Rz merge) and
+      multi-target controlled-gate support.
+
+  10. FSL DIALECT — HYBRID CONTINUOUS-DISCRETE MAMBA-2
+      Hand-rolled C kernels implementing the Mamba-2 selective SSM
+      with FSM hybrid semantics. Basic and selective variants with
+      depthwise convolution, SiLU gating, and discrete state
+      transitions. MLIR TableGen ops for compiler integration.
 
 ---
 
@@ -543,7 +596,7 @@ This project is a **sovereign corporate product** licensed under **Business Sour
   title={NVIDIA Stack: Reverse-Engineered GPU Compute Stack},
   author={Ahmad Ali Parr and Jessica Westerhoff},
   year={2026},
-  note={CuTe/SASS/MFMA simulator, PagedAttention, Mamba-2 SSD, LW-LGM, #q quantum dialect},
+  note={CuTe/SASS/MFMA simulator, PagedAttention, Mamba-2 SSD, LW-LGM, FSL dialect, #q quantum dialect},
   publisher={SNAPKITTYWEST},
   howpublished={\url{https://github.com/SNAPKITTYWEST/nvidia-stack}},
   license={BSL-1.1}
