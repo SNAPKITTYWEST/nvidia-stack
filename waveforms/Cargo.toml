@@ -1,0 +1,9 @@
+[package]
+name = "lw-lgm"
+version = "0.1.0"
+edition = "2021"
+description = "Latent-to-Waveform Linear Geometric Map (LW-LGM)"
+
+[dependencies]
+ndarray = "0.15"
+rand = "0.8"

@@ -66,19 +66,20 @@ PyTorch/CuTe Layouts → PTX/SASS ISA → Tensor Core/MFMA Microarchitecture →
 
 ### Coverage
 
-| Layer | NVIDIA | AMD |
-|-------|--------|-----|
-| Tensor Layout | CuTe layouts (Rust) | A/B row-major / column-major (Python) |
-| Instruction Set | SASS HMMA/LDG/STG (Rust) | AMDGPU MFMA ISA (asm) |
-| Microarchitecture | Tensor Core MAC simulation (Rust) | Matrix Core wave simulation |
-| Memory | Global/L1/L2 cache model | LDS bank conflict avoidance + XOR swizzle |
-| KV Cache | — | PagedAttention block table manager (HIP/CUDA) |
-| Logical Spec | — | Datalog/Souffle PagedAttention schema |
-| SSM Backbone | Mamba-2 SSD selective scan (CUDA) | Mamba-2 SSD selective scan (HIP) |
-| High-Level API | — | HIP/rocwmma GEMM (fragment loads, mfma_sync) |
-| Validation | — | Fragment map validator + structural checks |
-| Layout Search | — | Padding + XOR swizzle optimizer |
-| Assembly | — | gfx942 MFMA GEMM kernels |
+| Layer | NVIDIA | AMD | x86-64 |
+|-------|--------|-----|--------|
+| Tensor Layout | CuTe layouts (Rust) | A/B row-major / column-major (Python) | — |
+| Instruction Set | SASS HMMA/LDG/STG (Rust) | AMDGPU MFMA ISA (asm) | AVX2 FMA (NASM) |
+| Microarchitecture | Tensor Core MAC simulation (Rust) | Matrix Core wave simulation | OoO core scheduling model |
+| Memory | Global/L1/L2 cache model | LDS bank conflict avoidance + XOR swizzle | Cache-blocked GEMV |
+| KV Cache | — | PagedAttention block table manager (HIP/CUDA) | — |
+| Logical Spec | — | Datalog/Souffle PagedAttention schema | — |
+| SSM Backbone | Mamba-2 SSD selective scan (CUDA) | Mamba-2 SSD selective scan (HIP) | — |
+| Waveform Synthesis | — | — | LW-LGM latent-to-waveform (Rust/NASM) |
+| High-Level API | — | HIP/rocwmma GEMM (fragment loads, mfma_sync) | — |
+| Validation | — | Fragment map validator + structural checks | Linearity + energy tests |
+| Layout Search | — | Padding + XOR swizzle optimizer | — |
+| Assembly | — | gfx942 MFMA GEMM kernels | x86-64 AVX2 GEMV kernel |
 
 ---
 
@@ -114,6 +115,13 @@ nvidia-stack/
 │   ├── mamba2_torch.py                  PyTorch Mamba-2 SSD module (pure-PyTorch + CUDA dispatch)
 │   ├── mamba2.cu                        Mamba-2 SSD CUDA kernel (sm_86/sm_89+, fp8 quantisation)
 │   └── build_mamba2.py                 Build libmamba2.so (nvcc compile + link)
+├── waveforms/
+│   ├── Cargo.toml                      lw-lgm package (ndarray + rand)
+│   ├── src/
+│   │   ├── lib.rs                      build_dictionary + latent_to_waveform (Rust)
+│   │   └── main.rs                     CLI demo
+│   ├── latent_to_waveform_nasm.asm     x86-64 AVX2 GEMV kernel (NASM)
+│   └── lw_lgm.py                       Python reference implementation + validation
 ├── python/
 │   ├── fragment_map.py                  Opcode-accurate fragment map + layout search
 │   ├── structural_validator.py          Bijectivity, per-lane, VGPR, C/D checks
@@ -312,6 +320,43 @@ Features:
 - Chunk-parallel SSD kernel for long sequences
 - Haskell FFI: `mamba2_step_fp8()` / `mamba2_forward_fp8()`
 
+### LW-LGM Latent-to-Waveform Synthesis
+
+```bash
+# Rust (recommended)
+cd waveforms
+cargo run
+
+# Python reference
+cd waveforms
+python lw_lgm.py
+
+# NASM assembly kernel
+nasm -f elf64 -o latent_to_waveform_nasm.o latent_to_waveform_nasm.asm
+```
+
+Mathematical construction:
+- **Mother waveform**: φ(t) = Gaussian(σ₀)
+- **Dictionary atoms**: ψ_i(t) = (1/√|a_i|) φ((t - b_i)/a_i)
+- **Affine grid**: Logarithmic dilation + uniform translation
+- **Mapping**: x(t) = z^T W^T Ψ(t) (linear expansion in fixed dictionary)
+
+```rust
+use lw_lgm::{build_dictionary, latent_to_waveform};
+
+let psi = build_dictionary(1.0, 0.5, 2.0, -5.0, 5.0, 64, -10.0, 10.0, 0.01);
+let W = ndarray::Array2::<f64>::eye(64);
+let z = ndarray::Array1::<f64>::random(64, rand::distributions::Uniform::new(-1.0, 1.0));
+let x = latent_to_waveform(&z, &W, &psi);  // x ∈ ℝ^N
+```
+
+Features:
+- Linearity: L(αz₁ + βz₂) = αL(z₁) + βL(z₂)
+- Frame expansion in L^2(ℝ) with affine dictionary
+- Energy preservation via tight frame design
+- AVX2 FMA kernel with cache-blocking for large matrices
+- Python reference with linearity + energy validation tests
+
 ---
 
 ## Fragment Map (v_mfma_f32_16x16x16f16)
@@ -391,6 +436,12 @@ Eliminates bank conflicts without increasing LDS consumption.
      autoregressive inference, and Haskell FFI for BOB Architecture
      integration. Numerically equivalent CUDA and pure-PyTorch paths.
 
+  8. LW-LGM LATENT-TO-WAVEFORM LINEAR GEOMETRIC MAP
+     Explicit construction of analog waveforms from latent vectors
+     via affine group action on a mother Gaussian, with frame-theoretic
+     energy bounds, AVX2 FMA assembly kernel, and cache-blocked GEMV
+     for large dictionary matrices.
+
 ---
 
 ## License
@@ -413,7 +464,7 @@ This project is a **sovereign corporate product** licensed under **Business Sour
   title={NVIDIA Stack: Reverse-Engineered GPU Compute Stack},
   author={Ahmad Ali Parr and Jessica Westerhoff},
   year={2026},
-  note={CuTe/SASS/MFMA simulator, PagedAttention, Mamba-2 SSD selective scan},
+  note={CuTe/SASS/MFMA simulator, PagedAttention, Mamba-2 SSD, LW-LGM waveform synthesis},
   publisher={SNAPKITTYWEST},
   howpublished={\url{https://github.com/SNAPKITTYWEST/nvidia-stack}},
   license={BSL-1.1}
