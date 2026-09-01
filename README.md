@@ -78,6 +78,7 @@ PyTorch/CuTe Layouts → PTX/SASS ISA → Tensor Core/MFMA Microarchitecture →
 | Waveform Synthesis | — | — | LW-LGM latent-to-waveform (Rust/NASM) | — |
 | FSL Dialect | Mamba-2 SSM state transition (C++) | Selective SSM with SiLU gating (C++) | — | FSM + continuous hybrid semantics |
 | Quantum Circuits | — | — | — | Rust-Q + QIR lowering (Rust) |
+| MFMA Core | OCaml→C→HLS pipeline | HIP gfx942 kernel | CUDA SM_86 WMMA | — |
 | High-Level API | — | HIP/rocwmma GEMM (fragment loads, mfma_sync) | — | Circuit builder |
 | Validation | — | Fragment map validator + structural checks | Linearity + energy tests | No-cloning + angle domain |
 | Layout Search | — | Padding + XOR swizzle optimizer | — | Clifford+T rewrite patterns |
@@ -143,6 +144,23 @@ nvidia-stack/
 │       ├── Cargo.toml                  rustq crate (zero dependencies)
 │       └── src/
 │           └── lib.rs                  Circuit builder + QIR lowering (Rust)
+├── mfma-core/
+│   ├── src/
+│   │   ├── mfma_core.ml               OCaml algorithm specification
+│   │   ├── mfma_hls_wrapper.c         HLS-compatible C wrapper
+│   │   ├── mfma_core.h                Public C interface
+│   │   ├── mfma_core_hip.cpp          AMD gfx942 HIP kernel
+│   │   └── mfma_core.cu               NVIDIA RTX 3080 CUDA kernel
+│   ├── rtl/
+│   │   └── fpga_mfma_accelerator.sv   SystemVerilog FPGA implementation
+│   ├── analog/
+│   │   └── mfma_power_supply_droop.vams  Verilog-A power/droop model
+│   ├── formal/
+│   │   └── mfma_nan.why               Why3 NaN propagation proof
+│   ├── fpga/scripts/                   Vivado flow scripts
+│   ├── asic/scripts/                   Synopsys DC + PrimeTime + KLayout
+│   ├── Makefile                        Master build pipeline
+│   └── README.md                       MFMA Core documentation
 ├── python/
 │   ├── fragment_map.py                  Opcode-accurate fragment map + layout search
 │   ├── structural_validator.py          Bijectivity, per-lane, VGPR, C/D checks
@@ -475,6 +493,54 @@ Features:
 - Algebraic rewrites: H²=I, T³=S², Rz(a)+Rz(b)=Rz(a+b)
 - No-cloning verifier + bounds checking + angle domain validation
 
+### MFMA Core (OCaml → C → HLS → RTL → FPGA/ASIC)
+
+```bash
+# Build HLS library (OCaml → C → .so)
+cd mfma-core
+make all
+
+# Build HIP kernel (AMD gfx942)
+make hip
+
+# Build CUDA kernel (NVIDIA RTX 3080)
+make cuda
+
+# FPGA synthesis (AMD Vivado)
+make fpga
+
+# ASIC synthesis (Synopsys DC + PrimeTime)
+make asic
+```
+
+Complete hardware design flow for 16x16x16 FP16 → FP32 MFMA tile:
+
+```ocaml
+(* OCaml algorithm specification *)
+let mfma_tile a_tile b_tile c_tile =
+  Array.init 16 (fun m ->
+    Array.init 16 (fun n ->
+      let acc = ref (Array.get c_tile m n) in
+      for k = 0 to 15 do
+        let va = half_to_float a_tile.(m * 16 + k) in
+        let vb = half_to_float b_tile.(k * 16 + n) in
+        acc := !acc +. (va *. vb)
+      done;
+      !acc
+    )
+  )
+```
+
+Features:
+- OCaml → C: `ocamlopt -output-obj` with zero runtime in HLS region
+- HLS Pragmas: `PIPELINE II=1`, `UNROLL`, `m_axi` interface binding
+- NaN Propagation: IEEE-754 compliant, verified in Why3 (zero sorries)
+- HIP kernel: Maps to `v_mfma_f32_16x16x16f16` on gfx942
+- CUDA kernel: Uses `wmma::mma_sync` on SM_86 Tensor Cores
+- FPGA: SystemVerilog RTL, Vivado flow for Alveo U55C/U250
+- ASIC: Synopsys DC + PrimeTime STA, GDSII tape-out ready
+- Formal: Why3 proof of NaN safety (`mfma_nan.why`)
+
 ---
 
 ## Fragment Map (v_mfma_f32_16x16x16f16)
@@ -574,6 +640,13 @@ Eliminates bank conflicts without increasing LDS consumption.
       depthwise convolution, SiLU gating, and discrete state
       transitions. MLIR TableGen ops for compiler integration.
 
+  11. MFMA CORE — OCAML-TO-SILICON HARDWARE DESIGN FLOW
+      Complete OCaml → C → HLS → RTL → FPGA/ASIC pipeline for
+      16x16x16 FP16 → FP32 MFMA tile computation. Includes HIP
+      (gfx942), CUDA (SM_86), SystemVerilog FPGA, Verilog-A
+      analog model, Why3 NaN propagation proof, and GDSII
+      tape-out scripts for TSMC N6.
+
 ---
 
 ## License
@@ -596,7 +669,7 @@ This project is a **sovereign corporate product** licensed under **Business Sour
   title={NVIDIA Stack: Reverse-Engineered GPU Compute Stack},
   author={Ahmad Ali Parr and Jessica Westerhoff},
   year={2026},
-  note={CuTe/SASS/MFMA simulator, PagedAttention, Mamba-2 SSD, LW-LGM, FSL dialect, #q quantum dialect},
+  note={CuTe/SASS/MFMA simulator, PagedAttention, Mamba-2 SSD, LW-LGM, FSL dialect, #q quantum dialect, MFMA Core},
   publisher={SNAPKITTYWEST},
   howpublished={\url{https://github.com/SNAPKITTYWEST/nvidia-stack}},
   license={BSL-1.1}

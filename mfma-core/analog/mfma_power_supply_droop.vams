@@ -1,0 +1,22 @@
+// mfma_power_supply_droop.vams — Verilog-A Analog Power/Droop Model
+// Used exclusively for analog/mixed-signal co-simulation
+// Models power supply collapse during heavy MFMA execution
+// Cannot be synthesized onto an FPGA
+
+`include "disciplines.vams"
+
+module mfma_power_supply_droop (vdd, gnd, core_activity);
+    inout vdd, gnd;
+    input core_activity;
+    electrical vdd, gnd;
+    real core_activity;
+
+    parameter real nominal_v = 0.8;
+    parameter real r_source = 0.005;   // 5mOhm internal resistance
+    parameter real c_decap = 10e-9;    // 10nF decoupling capacitance
+
+    analog begin
+        // Dynamic voltage droop proportional to digital execution intensity
+        V(vdd, gnd) <+ nominal_v - (core_activity * r_source);
+    end
+endmodule

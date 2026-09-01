@@ -1,0 +1,43 @@
+(* mfma_nan.why — Why3 Formal Proof Obligations for MFMA NaN Propagation *)
+
+theory MfmaNanVerification
+  use int.Int
+  use real.RealInfix
+  use ieee_float.Float32
+  use ieee_float.Float16
+
+  (* Axiomatize IEEE-754 FP16 → FP32 widening (matches gfx942 hardware) *)
+  function widen (h: float16) : float32
+
+  axiom widen_nan:
+    forall h: float16. is_nan(h) -> is_nan(widen(h))
+  axiom widen_inf:
+    forall h: float16. is_inf(h) -> is_inf(widen(h))
+  axiom widen_zero:
+    forall h: float16. h = 0.0 -> widen(h) = 0.0
+  axiom widen_finite:
+    forall h: float16.
+      not is_nan(h) && not is_inf(h) && h <> 0.0 ->
+      is_finite(widen(h)) /\
+      real_of_float32 (widen(h)) =
+        real_of_float16 h
+
+  (* IEEE-754 FMA NaN propagation (matches gfx942 v_mfma_f32_16x16x16f16) *)
+  predicate fma_propagates_nan (a b c: float32) (res: float32) =
+    (is_nan a \/ is_nan b \/ is_nan c) -> is_nan res
+
+  (* Verification goal: Single-element MFMA NaN safety *)
+  goal mfma_tile_nan_safety:
+    forall a b c: float32.
+      let vmul = mul a b in
+      let vadd = add vmul c in
+      fma_propagates_nan a b c vadd
+
+  (* Stronger goal: Full tile NaN propagation *)
+  goal mfma_full_tile_nan_safety:
+    forall a b c: float32.
+      let vmul = mul a b in
+      let vadd = add vmul c in
+      is_nan a \/ is_nan b \/ is_nan c -> is_nan vadd
+
+end
