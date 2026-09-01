@@ -66,20 +66,21 @@ PyTorch/CuTe Layouts → PTX/SASS ISA → Tensor Core/MFMA Microarchitecture →
 
 ### Coverage
 
-| Layer | NVIDIA | AMD | x86-64 |
-|-------|--------|-----|--------|
-| Tensor Layout | CuTe layouts (Rust) | A/B row-major / column-major (Python) | — |
-| Instruction Set | SASS HMMA/LDG/STG (Rust) | AMDGPU MFMA ISA (asm) | AVX2 FMA (NASM) |
-| Microarchitecture | Tensor Core MAC simulation (Rust) | Matrix Core wave simulation | OoO core scheduling model |
-| Memory | Global/L1/L2 cache model | LDS bank conflict avoidance + XOR swizzle | Cache-blocked GEMV |
-| KV Cache | — | PagedAttention block table manager (HIP/CUDA) | — |
-| Logical Spec | — | Datalog/Souffle PagedAttention schema | — |
-| SSM Backbone | Mamba-2 SSD selective scan (CUDA) | Mamba-2 SSD selective scan (HIP) | — |
-| Waveform Synthesis | — | — | LW-LGM latent-to-waveform (Rust/NASM) |
-| High-Level API | — | HIP/rocwmma GEMM (fragment loads, mfma_sync) | — |
-| Validation | — | Fragment map validator + structural checks | Linearity + energy tests |
-| Layout Search | — | Padding + XOR swizzle optimizer | — |
-| Assembly | — | gfx942 MFMA GEMM kernels | x86-64 AVX2 GEMV kernel |
+| Layer | NVIDIA | AMD | x86-64 | Quantum |
+|-------|--------|-----|--------|---------|
+| Tensor Layout | CuTe layouts (Rust) | A/B row-major / column-major (Python) | — | — |
+| Instruction Set | SASS HMMA/LDG/STG (Rust) | AMDGPU MFMA ISA (asm) | AVX2 FMA (NASM) | QIR intrinsics |
+| Microarchitecture | Tensor Core MAC simulation (Rust) | Matrix Core wave simulation | OoO core scheduling model | Linear type verifier |
+| Memory | Global/L1/L2 cache model | LDS bank conflict avoidance + XOR swizzle | Cache-blocked GEMV | — |
+| KV Cache | — | PagedAttention block table manager (HIP/CUDA) | — | — |
+| Logical Spec | — | Datalog/Souffle PagedAttention schema | — | #q dialect (MLIR TableGen) |
+| SSM Backbone | Mamba-2 SSD selective scan (CUDA) | Mamba-2 SSD selective scan (HIP) | — | — |
+| Waveform Synthesis | — | — | LW-LGM latent-to-waveform (Rust/NASM) | — |
+| Quantum Circuits | — | — | — | Rust-Q + QIR lowering (Rust) |
+| High-Level API | — | HIP/rocwmma GEMM (fragment loads, mfma_sync) | — | Circuit builder |
+| Validation | — | Fragment map validator + structural checks | Linearity + energy tests | No-cloning + angle domain |
+| Layout Search | — | Padding + XOR swizzle optimizer | — | Clifford+T rewrite patterns |
+| Assembly | — | gfx942 MFMA GEMM kernels | x86-64 AVX2 GEMV kernel | — |
 
 ---
 
@@ -122,6 +123,17 @@ nvidia-stack/
 │   │   └── main.rs                     CLI demo
 │   ├── latent_to_waveform_nasm.asm     x86-64 AVX2 GEMV kernel (NASM)
 │   └── lw_lgm.py                       Python reference implementation + validation
+├── quantum/
+│   ├── include/
+│   │   ├── QuantumTypes.td             MLIR TableGen: qubit, qureg, pauli types
+│   │   └── QuantumOps.td              MLIR TableGen: alloc, unitary, entangle, measure ops
+│   ├── lib/
+│   │   ├── QuantumVerifier.cpp         Linear-type verifier (no-cloning, bounds, angles)
+│   │   └── QuantumRewritePatterns.cpp  Algebraic rewrites (H²=I, T³=S², Rz merge)
+│   └── rustq/
+│       ├── Cargo.toml                  rustq crate (zero dependencies)
+│       └── src/
+│           └── lib.rs                  Circuit builder + QIR lowering (Rust)
 ├── python/
 │   ├── fragment_map.py                  Opcode-accurate fragment map + layout search
 │   ├── structural_validator.py          Bijectivity, per-lane, VGPR, C/D checks
@@ -357,6 +369,65 @@ Features:
 - AVX2 FMA kernel with cache-blocking for large matrices
 - Python reference with linearity + energy validation tests
 
+### Quantum Dialect (#q) + Rust-Q
+
+```bash
+# Rust-Q circuit builder + QIR lowering
+cd quantum/rustq
+cargo test
+
+# MLIR dialect (requires LLVM/MLIR build)
+cd quantum
+mlir-tblgen --gen-op-decls include/QuantumOps.td -I include/
+mlir-tblgen --gen-op-defs include/QuantumOps.td -I include/
+```
+
+Linear-type quantum IR with no-cloning enforcement:
+
+```rust
+use rustq::{Circuit, QirLowering, ControlOperand};
+
+let mut c = Circuit::new();
+let q0 = c.alloca_qubit();   // !quantum.qubit (linear resource)
+let q1 = c.alloca_qubit();
+
+c.h(q0);                      // H gate (no controls)
+c.cx(q0, q1);                 // CNOT (controlled-X)
+
+// Controlled gate with register as control
+let reg = c.alloca_veq(3);
+c.controlled("h", vec![ControlOperand::Veq(reg)], vec![q1], vec![], false);
+
+let r0 = c.mz(q0);           // Measurement → i1
+let r1 = c.mz(q1);
+
+let qir = QirLowering::lower(&c);  // → __quantum__qis__* calls
+```
+
+MLIR TableGen definitions:
+
+```tablegen
+// Linear qubit type (no cloning)
+!quantum.qubit
+
+// Unitary with exact algebraic angles
+quantum.unitary %q [0.5] axis "Y" : (!quantum.qubit) -> !quantum.qubit
+
+// Controlled operation
+quantum.entangle [%c0, %c1] %t : (!quantum.qubit, !quantum.qubit) -> ...
+
+// Measurement
+quantum.measure %q -> "c" : (!quantum.qubit) -> (i1, !quantum.qubit)
+```
+
+Features:
+- Linear-type enforcement: every qubit has exactly one use
+- Exact algebraic angles (rational, not floating-point)
+- Controlled gates: single Veq, multi-qubit, multi-target
+- QIR lowering: `__quantum__qis__*` / `__quantum__rt__*` symbols
+- Algebraic rewrites: H²=I, T³=S², Rz(a)+Rz(b)=Rz(a+b)
+- No-cloning verifier + bounds checking + angle domain validation
+
 ---
 
 ## Fragment Map (v_mfma_f32_16x16x16f16)
@@ -442,6 +513,14 @@ Eliminates bank conflicts without increasing LDS consumption.
      energy bounds, AVX2 FMA assembly kernel, and cache-blocked GEMV
      for large dictionary matrices.
 
+  9. LINEAR-TYPE QUANTUM DIALECT (#q) + RUST-Q
+     Strict linear-type refinement of CUDA-Q Quake with no-cloning
+     enforcement at the type level, exact algebraic angles (rational,
+     not floating-point), and explicit QIR lowering to
+     __quantum__qis__* / __quantum__rt__* symbols. Includes
+     algebraic rewrite patterns (H²=I, T³=S², Rz merge) and
+     multi-target controlled-gate support.
+
 ---
 
 ## License
@@ -464,7 +543,7 @@ This project is a **sovereign corporate product** licensed under **Business Sour
   title={NVIDIA Stack: Reverse-Engineered GPU Compute Stack},
   author={Ahmad Ali Parr and Jessica Westerhoff},
   year={2026},
-  note={CuTe/SASS/MFMA simulator, PagedAttention, Mamba-2 SSD, LW-LGM waveform synthesis},
+  note={CuTe/SASS/MFMA simulator, PagedAttention, Mamba-2 SSD, LW-LGM, #q quantum dialect},
   publisher={SNAPKITTYWEST},
   howpublished={\url{https://github.com/SNAPKITTYWEST/nvidia-stack}},
   license={BSL-1.1}

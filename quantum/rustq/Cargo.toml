@@ -1,0 +1,8 @@
+[package]
+name = "rustq"
+version = "0.1.0"
+edition = "2021"
+description = "Rust-Q: Quake-inspired quantum IR + QIR lowering (pure Rust)"
+
+[dependencies]
+# none required for the core IR + lowering
